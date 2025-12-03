@@ -1,91 +1,121 @@
-# kelp_biomass_predictor.py
+# kelp_prediction_app.py
 
+import streamlit as st
 import pandas as pd
 import numpy as np
-import streamlit as st
-import matplotlib.pyplot as plt
 import seaborn as sns
+import matplotlib.pyplot as plt
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import StandardScaler
-from tensorflow.keras.models import Sequential
-from tensorflow.keras.layers import Dense, Dropout, BatchNormalization
-from tensorflow.keras.regularizers import l2
-from tensorflow.keras.callbacks import EarlyStopping
+from sklearn.neural_network import MLPRegressor
+from sklearn.metrics import mean_squared_error
+import io
 
-# Load your data
+st.set_page_config(page_title="Kelp Biomass Prediction Dashboard")
 st.title("🌿 Kelp Biomass Prediction Dashboard")
-uploaded_file = st.file_uploader("Upload your dataset (.csv)", type=['csv'])
+st.subheader("Upload dataset(s)")
 
-if uploaded_file:
-    df = pd.read_csv(uploaded_file)
+uploaded_files = st.file_uploader(
+    "Upload dataset(s)", type=["csv"], accept_multiple_files=True
+)
 
-    # Preview data
-    st.subheader("Raw Data")
-    st.write(df.head())
+required_columns = [
+    'Latitude', 'Longitude', 'Salinity', 'Depth', 'Temperature',
+    'Nutrient', 'Oxygen', 'Phosphate', 'Silicate', 'Nitrate and Nitrite+Nitrite',
+    'pH', 'Chlorophyll', 'Alkalinity', 'Dissolved Inorganic Carbon',
+    'Transmissivity', 'Biomass'
+]
 
-    # Expected columns (check this against your file!)
-    expected_cols = ['Latitude', 'Longitude', 'Salinity', 'Depth', 'Temperature', 'Nutrient', 'Biomass']
-    if not all(col in df.columns for col in expected_cols):
-        st.error(f"Missing required columns. Required: {expected_cols}")
-    else:
-        # Feature engineering
-        X = df[['Latitude', 'Longitude', 'Salinity', 'Depth', 'Temperature', 'Nutrient']]
-        y = df['Biomass']
+if uploaded_files:
+    dfs = []  # list to store individual DataFrames
+    for uploaded_file in uploaded_files:
+        st.write(f"📄 **File:** {uploaded_file.name}")
+        try:
+            temp_df = pd.read_csv(uploaded_file, sep=",", engine="python", on_bad_lines='skip')
+            dfs.append(temp_df)
+        except Exception as e:
+            st.error(f"❌ Error loading {uploaded_file.name}: {str(e)}")
 
-        # Train/Test split
-        X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+    # Combine all dataframes
+    df = pd.concat(dfs, ignore_index=True)            
+    st.info("Please upload a dataset with the following columns:")
+    st.code(', '.join(required_columns))
 
-        # Normalize features
-        scaler = StandardScaler()
-        X_train_scaled = scaler.fit_transform(X_train)
-        X_test_scaled = scaler.transform(X_test)
+    # Drop rows with missing values
+    df.dropna(inplace=True)
+    features = [
+        "Latitude", "Longitude", "Salinity", "Depth", "Temperature", "Nutrient",
+        "Oxygen", "Phosphate", "Silicate", "Nitrate and Nitrite+Nitrite", "pH", "Chlorophyll",
+        "Alkalinity", "Dissolved_Inorganic_Carbon", "Transmissivity"
+    ]
+    target = "Biomass"
 
-        # Model creation
-        model = Sequential([
-            Dense(128, activation='relu', input_shape=(X_train.shape[1],), kernel_regularizer=l2(0.001)),
-            BatchNormalization(),
-            Dropout(0.3),
-            Dense(64, activation='relu', kernel_regularizer=l2(0.001)),
-            BatchNormalization(),
-            Dropout(0.3),
-            Dense(1)  # Regression output
-        ])
+    # Split and scale
+    X = df[features]
+    y = df[target]
+    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+    scaler = StandardScaler()
+    X_train_scaled = scaler.fit_transform(X_train)
+    X_test_scaled = scaler.transform(X_test)
 
-        model.compile(optimizer='adam', loss='mse', metrics=['mae'])
+    # Train model
+    model = MLPRegressor(hidden_layer_sizes=(64, 32), max_iter=1000, random_state=42)
+    model.fit(X_train_scaled, y_train)
+    y_pred = model.predict(X_test_scaled)
+    st.success("Model training complete!")
 
-        # Train model with early stopping
-        early_stop = EarlyStopping(monitor='val_loss', patience=20, restore_best_weights=True)
-        history = model.fit(X_train_scaled, y_train,
-                            validation_split=0.2,
-                            epochs=200,
-                            batch_size=32,
-                            callbacks=[early_stop],
-                            verbose=0)
 
-        st.success("Model training complete!")
+    # Create a new DataFrame for heatmap
+    predict_features = [
+    "Latitude", "Longitude", "Salinity", "Depth", "Temperature", "Nutrient",
+    "Oxygen", "Phosphate", "Silicate", "Nitrate and Nitrite+Nitrite", "pH", "Chlorophyll",
+    "Alkalinity", "Dissolved_Inorganic_Carbon", "Transmissivity"
+    ]
+    X_scaled = scaler.transform(df[predict_features])
+    predictions = model.predict(X_scaled)
+    heatmap_df = df.copy()
+    heatmap_df["Predicted_Biomass"] = predictions
 
-        # Predict on full dataset
-        predictions = model.predict(scaler.transform(X))
-        df['Predicted Biomass'] = predictions
+    heatmap_df["lat_bin"] = heatmap_df["Latitude"].round(2)
+    heatmap_df["lon_bin"] = heatmap_df["Longitude"].round(2)
 
-        # Plot heatmap
-        st.subheader("Biomass Prediction Heatmap")
-        pivot = df.pivot_table(index='Latitude', columns='Longitude', values='Predicted Biomass')
-        fig, ax = plt.subplots(figsize=(10, 6))
-        sns.heatmap(pivot, cmap="YlGnBu", ax=ax)
-        st.pyplot(fig)
+    # Average predicted biomass per bin
+    grouped = (
+        heatmap_df.groupby(["lat_bin", "lon_bin"])["Predicted_Biomass"]
+        .mean()
+        .reset_index()
+    )
 
-        # Prediction form
-        st.subheader("Make a Custom Prediction")
-        lat = st.number_input("Latitude", value=float(df['Latitude'].mean()))
-        lon = st.number_input("Longitude", value=float(df['Longitude'].mean()))
-        sal = st.number_input("Salinity", value=float(df['Salinity'].mean()))
-        dep = st.number_input("Depth", value=float(df['Depth'].mean()))
-        temp = st.number_input("Temperature", value=float(df['Temperature'].mean()))
-        nut = st.number_input("Nutrient", value=float(df['Nutrient'].mean()))
+    # Pivot to 2D grid
+    heatmap_data = grouped.pivot(index="lat_bin", columns="lon_bin", values="Predicted_Biomass")
 
-        input_data = np.array([[lat, lon, sal, dep, temp, nut]])
-        input_scaled = scaler.transform(input_data)
-        biomass_pred = model.predict(input_scaled)[0][0]
+    # Plot
+    st.subheader("🌍 Biomass Prediction Heatmap")
+    fig, ax = plt.subplots(figsize=(12, 8))
+    sns.heatmap(heatmap_data, cmap="YlGnBu", ax=ax, cbar=True)
+    ax.set_xlabel("Longitude")
+    ax.set_ylabel("Latitude")
+    st.pyplot(fig)
 
-        st.metric("📈 Predicted Biomass", f"{biomass_pred:.2f}")
+
+    # Prediction Interface
+    st.write("### Predict Biomass for Custom Values")
+    input_data = {}
+    for feature in features:
+        try:
+            default_val = float(df[feature].mean())
+        except:
+            default_val = 0.0  # fallback if mean fails
+        input_data[feature] = st.number_input(feature, value=default_val, step=0.01)
+    input_df = pd.DataFrame([input_data])
+    input_scaled = scaler.transform(input_df)
+    predicted_biomass = model.predict(input_scaled)[0]
+    st.metric("📈 Predicted Biomass", round(predicted_biomass, 2))
+else:
+    st.info("Awaiting CSV file upload...")
+    st.markdown("Please upload a dataset with the following columns:")
+    st.code(", ".join([
+        "Latitude", "Longitude", "Salinity", "Depth", "Temperature", "Nutrient",
+        "Oxygen", "Phosphate", "Silicate", "Nitrate and Nitrite+Nitrite", "pH", "Chlorophyll",
+        "Alkalinity", "Dissolved_Inorganic_Carbon", "Transmissivity", "Biomass"
+    ]))
